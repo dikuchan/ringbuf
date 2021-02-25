@@ -3,81 +3,80 @@ use std::iter::FromIterator;
 #[cfg(test)]
 mod tests;
 
+pub struct RingBufferError;
+
 /// The usage of unsafe features (e.g. `MaybeUninit`) is restricted.
-/// Thus, this solution requires a type to implement the `Default` trait.
+/// Thus, the following solution requires a type to implement the `Default` trait.
 pub struct RingBuffer<T> {
     data: Vec<T>,
     head: usize,
     tail: usize,
-    full: bool,
 }
 
-impl<T: Default + Clone> RingBuffer<T> {
+impl<T: Default> RingBuffer<T> {
     pub fn with_capacity(n: usize) -> Self {
         Self {
-            data: vec![T::default(); n],
+            data: (0..n).map(|_| T::default()).collect(),
             head: 0,
             tail: 0,
-            full: false,
         }
     }
 
+    fn mask(&self, v: usize) -> usize {
+        v % self.capacity()
+    }
+
     /// Appends an element to the buffer if the buffer is not full.
-    /// Returns `true` if the element was added.
-    pub fn push(&mut self, v: T) -> bool {
-        if self.is_full() { return false; }
+    /// Reader pointer is shifted at the oldest element.
+    pub fn push(&mut self, v: T) -> Result<(), RingBufferError> {
+        if self.is_full() { return Err(RingBufferError); }
 
-        self.data[self.head] = v;
-        self.head = (self.head + 1) % self.data.capacity();
-        self.full = self.head == self.tail;
+        self.push_ignore(v);
 
-        true
+        Ok(())
     }
 
     /// Appends an element to the buffer even if the buffer is full.
-    /// Reader pointer is shifted at the oldest element.
     pub fn push_ignore(&mut self, v: T) {
-        self.data[self.head] = v;
-        if self.full { self.tail = (self.tail + 1) % self.data.capacity(); }
-        self.head = (self.head + 1) % self.data.capacity();
-        self.full = self.head == self.tail;
+        self.head += 1;
+        let index = self.mask(self.head);
+        self.data[index] = v;
     }
 
     /// Removes the last added element from the buffer and returns it.
-    /// Returns `false` if the buffer is empty and the element was not removed.
     pub fn pop(&mut self) -> Option<T> {
         if self.is_empty() { return None; }
 
-        let result = std::mem::take(&mut self.data[self.tail]);
-        self.full = false;
-        self.tail = (self.tail + 1) % self.data.capacity();
+        self.tail += 1;
+        let index = self.mask(self.tail);
+        let result = std::mem::take(&mut self.data[index]);
 
         Some(result)
     }
 
-    /// Clears the buffer, removing all values.
     pub fn clear(&mut self) {
         self.data.clear();
         self.head = 0;
         self.tail = 0;
-        self.full = false;
     }
 
     /// Returns `true` if the buffer contains no elements.
     pub fn is_empty(&self) -> bool {
-        !self.full && (self.head == self.tail)
+        self.head == self.tail
     }
 
     /// Returns `true` if `len` is equal to `capacity`.
-    pub fn is_full(&self) -> bool { self.full }
+    pub fn is_full(&self) -> bool { 
+        self.len() == self.capacity() 
+    }
 
     /// Returns the number of elements the buffer holds.
     pub fn len(&self) -> usize {
-        if self.full { return self.data.capacity(); }
-        if self.head >= self.tail {
-            self.head - self.tail
+        let delta = self.head - self.tail;
+        if delta >= self.capacity() {
+            self.capacity()
         } else {
-            self.data.capacity() + self.head - self.tail
+            self.mask(delta)
         }
     }
 
@@ -101,7 +100,7 @@ impl<T: Default + Clone> RingBuffer<T> {
     }
 }
 
-impl<T: Default + Clone> IntoIterator for RingBuffer<T> {
+impl<T: Default> IntoIterator for RingBuffer<T> {
     type Item = T;
     type IntoIter = IntoIter<T>;
 
@@ -109,17 +108,17 @@ impl<T: Default + Clone> IntoIterator for RingBuffer<T> {
 }
 
 /// Iterator for the values of `T`.
-pub struct IntoIter<T: Default + Clone> {
+pub struct IntoIter<T: Default> {
     buffer: RingBuffer<T>,
 }
 
-impl<T: Default + Clone> Iterator for IntoIter<T> {
+impl<T: Default> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> { self.buffer.pop() }
 }
 
-impl<'a, T: Default + Clone> IntoIterator for &'a RingBuffer<T> {
+impl<'a, T: Default> IntoIterator for &'a RingBuffer<T> {
     type Item = &'a T;
     type IntoIter = Iter<'a, T>;
 
@@ -127,27 +126,28 @@ impl<'a, T: Default + Clone> IntoIterator for &'a RingBuffer<T> {
 }
 
 /// Iterator for the values of `&T`.
-pub struct Iter<'a, T: Default + Clone> {
+pub struct Iter<'a, T: Default> {
     buffer: &'a RingBuffer<T>,
     index: usize,
     traversed: bool,
 }
 
-impl<'a, T: Default + Clone> Iterator for Iter<'a, T> {
+impl<'a, T: Default> Iterator for Iter<'a, T> {
     type Item = &'a T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index == self.buffer.head {
+        if self.buffer.mask(self.index) == self.buffer.mask(self.buffer.head) {
             if self.traversed { return None; } else { self.traversed = true; }
         }
-        let result = &self.buffer.data[self.index];
-        self.index = (self.index + 1) % self.buffer.data.capacity();
+        self.index += 1;
+        let i = self.buffer.mask(self.index);
+        let result = &self.buffer.data[i];
 
         Some(result)
     }
 }
 
-impl<T: Default + Clone> FromIterator<T> for RingBuffer<T> {
+impl<T: Default> FromIterator<T> for RingBuffer<T> {
     /// Conversion from an `Iterator`.
     fn from_iter<I: IntoIterator<Item=T>>(iter: I) -> Self {
         let mut data = Vec::<T>::new();
@@ -159,7 +159,6 @@ impl<T: Default + Clone> FromIterator<T> for RingBuffer<T> {
             head: 0,
             data,
             tail: 0,
-            full: true,
         }
     }
 }
